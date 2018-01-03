@@ -5,8 +5,10 @@
 
 namespace GraphQL\Tests\Utils;
 
+use GraphQL\Type\Definition\InterfaceType;
 use GraphQL\Type\Definition\ObjectType;
 use GraphQL\Type\Definition\Type;
+use GraphQL\Type\Definition\UnionType;
 use GraphQL\Type\Schema;
 use GraphQL\Utils\SchemaFilter;
 use GraphQL\Utils\FindBreakingChanges;
@@ -150,6 +152,188 @@ class SchemaFilterTest extends \PHPUnit_Framework_TestCase
     $this->assertEquals([], FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema));
 
     $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'query root { type1 { field1(name: "testing") } }');
+    $this->assertGreaterThan(0, count(FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema)));
+  }
+
+  public function testFiltersOutUnusedTypesInMutations()
+  {
+    $type1 = new ObjectType([
+      'name' => 'Type1',
+      'fields' => [
+        'field1' => ['type' => Type::string()]
+      ]
+    ]);
+    $type2 = new ObjectType([
+      'name' => 'Type2',
+      'fields' => [
+        'field1' => ['type' => Type::string()]
+      ]
+    ]);
+
+    $oldSchema = new Schema([
+      'query' => new ObjectType([
+        'name' => 'Query',
+        'fields' => [
+          'type1' => $type1,
+          'type2' => $type2
+        ]
+      ]),
+      'mutation' => new ObjectType([
+        'name' => 'Mutation',
+        'fields' => [
+          'type1' => $type1,
+          'type2' => $type2
+        ]
+      ])
+    ]);
+    $newSchema = new Schema([
+      'query' => new ObjectType([
+        'name' => 'Query',
+        'fields' => [
+          'type1' => $type1,
+          'type2' => $type2
+        ]
+      ]),
+      'mutation' => new ObjectType([
+        'name' => 'Mutation',
+        'fields' => [
+          'type1' => $type1
+        ]
+      ])
+    ]);
+
+    $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'mutation Mutation { type1 }');
+    $this->assertEquals([], FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema));
+
+    $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'mutation Mutation { type2 }');
+    $this->assertGreaterThan(0, count(FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema)));
+  }
+
+  public function testFiltersOutUnusedMutations()
+  {
+    $type1 = new ObjectType([
+      'name' => 'Type1',
+      'fields' => [
+        'field1' => ['type' => Type::string()]
+      ]
+    ]);
+    $type2 = new ObjectType([
+      'name' => 'Type2',
+      'fields' => [
+        'field1' => ['type' => Type::string()]
+      ]
+    ]);
+
+    $oldSchema = new Schema([
+      'query' => new ObjectType([
+        'name' => 'Query',
+        'fields' => [
+          'type1' => $type1,
+          'type2' => $type2
+        ]
+      ]),
+      'mutation' => new ObjectType([
+        'name' => 'Mutation',
+        'fields' => [
+          'type1' => $type1,
+          'type2' => $type2
+        ]
+      ])
+    ]);
+    $newSchema = new Schema([
+      'query' => new ObjectType([
+        'name' => 'Query',
+        'fields' => [
+          'type1' => $type1,
+          'type2' => $type2
+        ]
+      ])
+    ]);
+
+    $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'query Query { type1 }');
+    $this->assertEquals([], FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema));
+
+    $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'mutation Mutation { type2 }');
+    $this->assertGreaterThan(0, count(FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema)));
+  }
+
+  public function testFilterWorksWithInterfaces() {
+    $interfaceType = new InterfaceType([
+      'name' => 'Type1',
+      'fields' => [
+        'field1' => ['type' => Type::string()]
+      ]
+    ]);
+
+    $oldSchema = new Schema([
+      'query' => new ObjectType([
+        'name' => 'root',
+        'fields' => [
+          'type1' => $interfaceType
+        ]
+      ])
+    ]);
+
+    $newSchema = new Schema([
+      'query' => new ObjectType([
+        'name' => 'root',
+        'fields' => [
+        ]
+      ])
+    ]);
+
+    $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'query root { type1 { field1 } }');
+    $this->assertGreaterThan(0, count(FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema)));
+  }
+
+  public function testFilterWorksWithUnions() {
+    $typeInUnion1 = new ObjectType([
+      'name' => 'TypeInUnion1',
+      'fields' => [
+        'field1' => Type::string()
+      ]
+    ]);
+
+    $typeInUnion2 = new ObjectType([
+      'name' => 'TypeInUnion2',
+      'fields' => [
+        'field1' => Type::string()
+      ]
+    ]);
+
+    $unionTypeThatLosesATypeOld = new UnionType([
+      'name' => 'UnionTypeThatLosesAType',
+      'types' => [$typeInUnion1, $typeInUnion2],
+      'resolveType' => function () {
+      }
+    ]);
+
+    $unionTypeThatLosesATypeNew = new UnionType([
+      'name' => 'UnionTypeThatLosesAType',
+      'types' => [$typeInUnion1],
+      'resolveType' => function () {
+      }
+    ]);
+
+    $oldSchema = new Schema([
+      'query' => new ObjectType([
+        'name' => 'root',
+        'fields' => [
+          'type1' => $unionTypeThatLosesATypeOld
+        ]
+      ])
+    ]);
+
+    $newSchema = new Schema([
+      'query' => new ObjectType([
+        'name' => 'root',
+        'fields' => [
+          'type1' => $unionTypeThatLosesATypeNew
+        ]
+      ])
+    ]);
+
+    $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'query root { type1 { ... on TypeInUnion2 { field1 } } }');
     $this->assertGreaterThan(0, count(FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema)));
   }
 }
