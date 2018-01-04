@@ -63,14 +63,17 @@ class SchemaFilter
             $schema_stack[] = $schema_cursor;
             break;
           case NodeKind::OPERATION_DEFINITION:
-            $result_stack[] = ['key' => $node->operation, 'value' => ['name' => $node->name->value]];
+            $result_stack[] = ['key' => $node->operation, 'value' => ['name' => $node->name->value, 'interfaces' => []]];
             $schema_cursor = $node->operation == 'query' ? $schema_cursor->getQueryType() : $schema_cursor->getMutationType();
             $schema_stack[] = $schema_cursor;
             break;
           case NodeKind::SELECTION_SET:
+            $check_interfaces = false;
+            $prev_schema_cursor = $schema_cursor;
             if (gettype($schema_cursor) == 'object') {
               $result_stack[] = ['key' => 'fields', 'value' => []];
               $schema_cursor = $schema_cursor->getFields();
+              $check_interfaces = true;
             } else {
               print("\n\nHI\n");
               print(json_encode($schema_cursor));
@@ -84,14 +87,58 @@ class SchemaFilter
               } else {
                 $result_stack[] = ['key' => 'fields', 'value' => []];
                 $schema_cursor = $schema_cursor['type']->getFields();
+                if ($fieldType == 'ObjectType') {
+                  $check_interfaces = true;
+                }
+              }
+            }
+            if ($check_interfaces) {
+              if (gettype($prev_schema_cursor) == 'object') {
+                $interfaces = $prev_schema_cursor->getInterfaces();
+                print("OBJECT");
+              } else {
+                $interfaces = $prev_schema_cursor['type']->getInterfaces();
+                print(json_encode($prev_schema_cursor));
+              }
+              print("\n\nHELLO\n");
+              print(json_encode($interfaces));
+              foreach ($interfaces as $interface) {
+                $interface_in_query = false;
+                foreach($interface->getFields() as $interfaceField) {
+                  foreach($node->selections as $queryField) {
+                    // ASSUMPTION: every SelectionNode in `selections` is a FieldNode
+                    print("\n\nTESTING\n");
+                    print($interfaceField->name);
+                    print($queryField->name->value);
+                    if ($interfaceField->name == $queryField->name->value) {
+                      $interface_in_query = true;
+                      break;
+                    }
+                  }
+                  if ($interface_in_query) {
+                    break;
+                  }
+                }
+                if ($interface_in_query) {
+                  if (array_key_exists('interfaces', $result_stack[count($result_stack) - 2]['value'])) {
+                    $result_stack[count($result_stack) - 2]['value']['interfaces'][] = $interface;
+                  } else {
+                    $result_stack[count($result_stack) - 2]['value']['type']['interfaces'][] = $interface;
+                  }
+                }
               }
             }
             $schema_stack[] = $schema_cursor;
             break;
           case NodeKind::FIELD:
+            print("\n\nTESTING2\n");
+            print(json_encode($schema_cursor));
             $schema_cursor = $schema_cursor[$node->name->value]->config;
             $fieldTypePath = explode('\\', get_class($schema_cursor['type']));
             $result_stack[] = ['key' => $node->name->value, 'value' => ['type' => ['name' => $schema_cursor['type']->name]], 'fieldType' => $fieldTypePath[count($fieldTypePath) - 1]];
+            if ($result_stack[count($result_stack) - 1]['fieldType'] == 'ObjectType') {
+              $result_stack[count($result_stack) - 1]['value']['type']['interfaces'] = [];
+            }
             $schema_stack[] = $schema_cursor;
             break;
           case NodeKind::ARGUMENT:
@@ -139,7 +186,17 @@ class SchemaFilter
               if (is_null($field_type)) {
                 if ($result_last['fieldType'] == 'UnionType') {
                   $field_type = new UnionType($result_last['value']['type']);
+                } else if ($result_last['fieldType'] == 'InterfaceType') {
+                  $field_type = new InterfaceType($result_last['value']['type']);
                 } else {
+                  // check if we have to add fields from interfaces first
+                  foreach ($result_last['value']['type']['interfaces'] as $interface) {
+                    foreach ($interface->getFields() as $field) {
+                      if (!array_key_exists($field->name, $result_last['value']['type']['fields'])) {
+                        $result_last['value']['type']['fields'][$field->name] = $field->config;
+                      }
+                    }
+                  }
                   $field_type = new ObjectType($result_last['value']['type']);
                 }
               }
@@ -155,8 +212,14 @@ class SchemaFilter
             }
             break;
           case NodeKind::INLINE_FRAGMENT:
-            $result_last['value']['type'] = new ObjectType($result_last['value']['type']);
-            $result_stack[count($result_stack) - 1]['value'][] = $result_last['value']['type'];
+            if ($result_last['fieldType'] == 'UnionType') {
+              $field_type = new UnionType($result_last['value']['type']);
+            } else if ($result_last['fieldType'] == 'InterfaceType') {
+              $field_type = new InterfaceType($result_last['value']['type']);
+            } else {
+              $field_type = new ObjectType($result_last['value']['type']);
+            }
+            $result_stack[count($result_stack) - 1]['value'][] = $field_type;
             break;
         }
       }
