@@ -5,6 +5,7 @@
 
 namespace GraphQL\Tests\Utils;
 
+use GraphQL\Type\Definition\EnumType;
 use GraphQL\Type\Definition\InterfaceType;
 use GraphQL\Type\Definition\ObjectType;
 use GraphQL\Type\Definition\Type;
@@ -348,11 +349,51 @@ class SchemaFilterTest extends \PHPUnit_Framework_TestCase
         ]
       ])
     ]);
-/*
+
     $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'query root { type1 { ... on TypeInUnion1 { field1 } } }');
     $this->assertEquals([], FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema));
 
     $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'query root { type1 { ... on TypeInUnion2 { field1 } } }');
-    $this->assertGreaterThan(0, count(FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema)));*/
+    $this->assertGreaterThan(0, count(FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema)));
+  }
+
+  public function testFilterWorksWithEnums() {
+    $enumTypeThatLosesAValueOld = new EnumType([
+      'name' => 'EnumTypeThatLosesAValue',
+      'values' => [
+        'VALUE0' => 0,
+        'VALUE1' => 1,
+        'VALUE2' => 2
+      ]
+    ]);
+
+    $enumTypeThatLosesAValueNew = new EnumType([
+      'name' => 'EnumTypeThatLosesAValue',
+      'values' => [
+        'VALUE1' => 1,
+        'VALUE2' => 2
+      ]
+    ]);
+
+    $oldSchema = new Schema([
+      'query' => new ObjectType([
+        'name' => 'root',
+        'fields' => [
+          'type1' => $enumTypeThatLosesAValueOld
+        ]
+      ])
+    ]);
+
+    $newSchema = new Schema([
+      'query' => new ObjectType([
+        'name' => 'root',
+        'fields' => [
+          'type1' => $enumTypeThatLosesAValueNew
+        ]
+      ])
+    ]);
+
+    $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'query root { type1 }');
+    $this->assertGreaterThan(0, count(FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema)));
   }
 }
