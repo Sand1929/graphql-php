@@ -4,9 +4,12 @@
  */
 namespace GraphQL\Utils;
 
+use Exception;
 use GraphQL\Language\Parser;
 use GraphQL\Language\Visitor;
+use GraphQL\Language\AST\DocumentNode;
 use GraphQL\Type\Schema;
+use GraphQL\Type\Definition\FieldDefinition;
 use GraphQL\Type\Definition\InterfaceType;
 use GraphQL\Type\Definition\ObjectType;
 use GraphQL\Type\Definition\Type;
@@ -38,202 +41,295 @@ class SchemaFilter
     }
   }
 
+  private static function hasOperation($operation, $ast) {
+    foreach ($ast->definitions as $definitionNode) {
+      if ($definitionNode->kind == NodeKind::OPERATION_DEFINITION && $definitionNode->operation == $operation) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static function getTypeClass($type) {
+    print(get_class($type));
+    if (is_a($type, 'GraphQL\Type\Definition\InterfaceType')) {
+      return 'InterfaceType';
+    } else if (is_a($type, 'GraphQL\Type\Definition\UnionType')) {
+      return 'UnionType';
+    } else if (is_a($type, 'GraphQL\Type\Definition\ObjectType')) {
+      return 'ObjectType';
+    } else if (is_a($type, 'GraphQL\Type\Definition\ScalarType')) {
+      return 'ScalarType';
+    } else if (is_a($type, 'GraphQL\Type\Definition\EnumType')) {
+      return 'EnumType';
+    } else {
+      throw new Exception('Invalid type class');
+    }
+  }
+
   /**
-   * Given a schema and a query string, returns a new schema that includes only
-   * those parts used in the query.
+   * Takes a schema and query, and returns data on each Type necessary to do the actual filtering.
    */
-  public static function filterSchemaByQuery(Schema $schema, string $query)
+  private static function getTypeData(Schema $schema, DocumentNode $ast)
   {
-    $result_stack = [];
-    $schema_stack = [];
-    $schema_cursor = $schema;
-    $ast = Parser::parse($query, ['noLocation' => true]);
+    $result = [];
+    $schema_stack = [$schema];
+
+    // add query data if necessary
+    if (!self::hasOperation('query', $ast)) {
+      $query = $schema->getQueryType();
+      $result[$query->name] = ['typeClass' => 'ObjectType', 'object' => $query];
+    }
+
     Visitor::visit($ast, [
-      'enter' => function ($node) use ($schema, &$result_stack, &$schema_stack, &$schema_cursor) {
-        $actionableNodeKinds = [NodeKind::DOCUMENT, NodeKind::OPERATION_DEFINITION, NodeKind::SELECTION_SET, NodeKind::FIELD, NodeKind::ARGUMENT, NodeKind::INLINE_FRAGMENT];
-        if (!empty($result_stack) && in_array($node->kind, $actionableNodeKinds)) {
-          $result_stack[count($result_stack) - 1]['hasChildren'] = true;
-        }
-        print($node);
-        print(gettype($schema_cursor));
+      'enter' => function ($node) use ($schema, &$result, &$schema_stack) {
+        print($node->kind);
+        $last = $schema_stack[count($schema_stack) - 1];
         switch ($node->kind) {
-          case NodeKind::DOCUMENT:
-            $result_stack[] = ['key' => null, 'value' => []];
-            $schema_cursor = $schema;
-            $schema_stack[] = $schema_cursor;
-            break;
           case NodeKind::OPERATION_DEFINITION:
-            $result_stack[] = ['key' => $node->operation, 'value' => ['name' => $node->name->value, 'interfaces' => []]];
-            $schema_cursor = $node->operation == 'query' ? $schema_cursor->getQueryType() : $schema_cursor->getMutationType();
-            $schema_stack[] = $schema_cursor;
-            break;
-          case NodeKind::SELECTION_SET:
-            $check_interfaces = false;
-            $prev_schema_cursor = $schema_cursor;
-            if (gettype($schema_cursor) == 'object') {
-              $result_stack[] = ['key' => 'fields', 'value' => []];
-              $schema_cursor = $schema_cursor->getFields();
-              $check_interfaces = true;
-            } else {
-              print("\n\nHI\n");
-              print(json_encode($schema_cursor));
-              print(get_class($schema_cursor['type']));
-              $fieldType = $result_stack[count($result_stack) - 1]['fieldType'];
-              print($fieldType);
-              if ($fieldType == 'UnionType') {
-                $result_stack[] = ['key' => 'types', 'value' => []];
-                $schema_cursor = $schema_cursor['type']->getTypes();
-                print(json_encode($schema_cursor));
-              } else {
-                $result_stack[] = ['key' => 'fields', 'value' => []];
-                $schema_cursor = $schema_cursor['type']->getFields();
-                if ($fieldType == 'ObjectType') {
-                  $check_interfaces = true;
+            $last = $node->operation == 'query' ? $last->getQueryType() : $last->getMutationType();
+            $schema_stack[] = $last;
+            $config = ['name' => $last->name, 'fields' => [], 'interfaces' => []];
+            foreach($node->selectionSet->selections as $selectionNode) {
+              if ($selectionNode->kind == NodeKind::FIELD) {
+                $field = $last->getField($selectionNode->name->value);
+                $fieldConfig = ['name' => $field->name, 'type' => $field->getType()->name, 'args' => []];
+                // Args
+                if (!is_null($selectionNode->arguments)) {
+                  foreach($selectionNode->arguments as $argumentNode) {
+                    $argument = $field->getArg($argumentNode->name->value);
+                    $argumentConfig = ['name' => $argument->name, 'type' => $argument->getType()->name];
+                    if ($argument->defaultValueExists()) {
+                      $argumentConfig['defaultValue'] = $argument->defaultValue;
+                    }
+                    $fieldConfig['args'][] = $argumentConfig;
+                  }
+                }
+                $config['fields'][] = $fieldConfig;
+              } else if ($selectionNode->kind == NodeKind::INLINE_FRAGMENT) {
+                //TODO
+              } else if ($selectionNode->kind == NodeKind::FRAGMENT_SPREAD) {
+                //TODO
+              }
+            }
+            //TODO: interfaces
+            $fieldNames = array_map(function ($f) { return $f['name']; }, $config['fields']);
+            foreach ($last->getInterfaces() as $interfaceType) {
+              foreach ($interfaceType->getFields() as $interfaceField) {
+                if (in_array($interfaceField->name, $fieldNames)) {
+                  $config['interfaces'][] = $interfaceType;
+                  break;
                 }
               }
             }
-            if ($check_interfaces) {
-              if (gettype($prev_schema_cursor) == 'object') {
-                $interfaces = $prev_schema_cursor->getInterfaces();
-                print("OBJECT");
-              } else {
-                $interfaces = $prev_schema_cursor['type']->getInterfaces();
-                print(json_encode($prev_schema_cursor));
+            // now we have to add all fields in interfaces that are not already included
+            foreach ($config['interfaces'] as $interfaceType) {
+              foreach ($interfaceType->getFields() as $interfaceField) {
+                if (!in_array($interfaceField->name, $fieldNames)) {
+                  $config['fields'][] = ['name' => $interfaceField->name, 'type' => $interfaceField->getType(), 'args' => $interfaceField->args];
+                }
               }
-              print("\n\nHELLO\n");
-              print(json_encode($interfaces));
-              foreach ($interfaces as $interface) {
-                $interface_in_query = false;
-                foreach($interface->getFields() as $interfaceField) {
-                  foreach($node->selections as $queryField) {
-                    // ASSUMPTION: every SelectionNode in `selections` is a FieldNode
-                    print("\n\nTESTING\n");
-                    print($interfaceField->name);
-                    print($queryField->name->value);
-                    if ($interfaceField->name == $queryField->name->value) {
-                      $interface_in_query = true;
+            }
+            $result[$last->name] = ['typeClass' => 'ObjectType', 'config' => $config];
+            break;
+          case NodeKind::SELECTION_SET:
+            if (method_exists($last, 'getFields')) {
+              $last = $last->getFields();
+            } else {
+              $type = $last->getType();
+              $typeClass = self::getTypeClass($type);
+              if ($typeClass == 'UnionType') {
+                $last = $type->getTypes();
+              } else {
+                $last = $type->getFields();
+              }
+            }
+            $schema_stack[] = $last;
+            break;
+          case NodeKind::FIELD:
+            print($node->name->value);
+            print(count($node->arguments));
+            $last = $last[$node->name->value];
+            $schema_stack[] = $last;
+            $type = $last->getType();
+            $typeClass = self::getTypeClass($type);
+            if ($typeClass == 'EnumType' || $typeClass == 'ScalarType' || is_null($node->selectionSet)) {
+              $result[$type->name] = ['typeClass' => $typeClass, 'object' => $type];
+              break;
+            }
+
+            $config = ['name' => $type->name];
+            if ($typeClass == 'ObjectType' || $typeClass == 'InterfaceType') {
+              $config['fields'] = [];
+              foreach($node->selectionSet->selections as $selectionNode) {
+                if ($selectionNode->kind == NodeKind::FIELD) {
+                  $field = $type->getField($selectionNode->name->value);
+                  $fieldConfig = ['name' => $field->name, 'type' => $field->getType()->name, 'args' => []];
+                  // Args
+                  if (!is_null($selectionNode->arguments)) {
+                    foreach ($selectionNode->arguments as $argumentNode) {
+                      $argument = $field->getArg($argumentNode->name->value);
+                      $argumentConfig = ['name' => $argument->name, 'type' => $argument->getType()->name];
+                      if ($argument->defaultValueExists()) {
+                        $argumentConfig['defaultValue'] = $argument->defaultValue;
+                      }
+                      $fieldConfig['args'][] = $argumentConfig;
+                    }
+                  }
+                  $config['fields'][] = $fieldConfig;
+                } else if ($selectionNode->kind == NodeKind::INLINE_FRAGMENT) {
+                  //TODO
+                } else if ($selectionNode->kind == NodeKind::FRAGMENT_SPREAD) {
+                  //TODO
+                }
+              }
+
+              //TODO: interfaces
+              if ($typeClass == 'ObjectType') {
+                $config['interfaces'] = [];
+                $fieldNames = array_map(function ($f) { return $f['name']; }, $config['fields']);
+                foreach ($type->getInterfaces() as $interfaceType) {
+                  foreach ($interfaceType->getFields() as $interfaceField) {
+                    if (in_array($interfaceField->name, $fieldNames)) {
+                      $config['interfaces'][] = $interfaceType;
                       break;
                     }
                   }
-                  if ($interface_in_query) {
-                    break;
-                  }
                 }
-                if ($interface_in_query) {
-                  if (array_key_exists('interfaces', $result_stack[count($result_stack) - 2]['value'])) {
-                    $result_stack[count($result_stack) - 2]['value']['interfaces'][] = $interface;
-                  } else {
-                    $result_stack[count($result_stack) - 2]['value']['type']['interfaces'][] = $interface;
+                // now we have to add all fields in interfaces that are not already included
+                foreach ($config['interfaces'] as $interfaceType) {
+                  foreach ($interfaceType->getFields() as $interfaceField) {
+                    if (!in_array($interfaceField->name, $fieldNames)) {
+                      $config['fields'][] = ['name' => $interfaceField->name, 'type' => $interfaceField->getType(), 'args' => $interfaceField->args];
+                    }
                   }
                 }
               }
+            } else if ($typeClass == 'UnionType') {
+              $config['types'] = [];
+              $possibleTypes = [];
+              foreach ($type->getTypes() as $possibleType) {
+                $possibleTypes[$possibleType->name] = $possibleType;
+              }
+              foreach($node->selectionSet->selections as $selectionNode) {
+                if ($selectionNode->kind == NodeKind::INLINE_FRAGMENT) {
+                  $config['types'][] = $possibleTypes[$selectionNode->typeCondition->name->value];
+                } else {
+                  //TODO
+                }
+              }
             }
-            $schema_stack[] = $schema_cursor;
-            break;
-          case NodeKind::FIELD:
-            print("\n\nTESTING2\n");
-            print(json_encode($schema_cursor));
-            $schema_cursor = $schema_cursor[$node->name->value]->config;
-            $fieldTypePath = explode('\\', get_class($schema_cursor['type']));
-            $result_stack[] = ['key' => $node->name->value, 'value' => ['type' => ['name' => $schema_cursor['type']->name]], 'fieldType' => $fieldTypePath[count($fieldTypePath) - 1]];
-            if ($result_stack[count($result_stack) - 1]['fieldType'] == 'ObjectType') {
-              $result_stack[count($result_stack) - 1]['value']['type']['interfaces'] = [];
-            }
-            $schema_stack[] = $schema_cursor;
+            $result[$type->name] = ['typeClass' => $typeClass, 'config' => $config];
             break;
           case NodeKind::ARGUMENT:
-            $schema_cursor = $schema_cursor['args'];
-            $result_stack[] = ['key' => 'args', 'value' => [$node->name->value => $schema_cursor[$node->name->value]]];
-            $schema_stack[] = $schema_cursor;
+            $last = $last->getArg($node->name->value);
+            $schema_stack[] = $last;
+            $type = $last->getType();
+            $result[$type->name] = ['type' => 'InputType', 'object' => $type];
             break;
           case NodeKind::INLINE_FRAGMENT:
-            foreach ($schema_cursor as $type) {
+            //TODO
+            print(json_encode($last));
+            foreach ($last as $type) {
               if ($type->name == $node->typeCondition->name->value) {
-                $schema_cursor = $type;
+                $last = $type;
                 break;
               }
             }
-            $fieldTypePath = explode('\\', get_class($schema_cursor));
-            $result_stack[] = ['key' => null, 'value' => ['type' => ['name' => $node->typeCondition->name->value]], 'fieldType' => $fieldTypePath[count($fieldTypePath) - 1]];
-            $schema_stack[] = $schema_cursor;
+            $schema_stack[] = $last;
             break;
         }
       },
-      'leave' => function ($node, $key, $parent) use ($schema, &$result_stack, &$schema_stack, &$schema_cursor) {
+      'leave' => function ($node) use ($schema, &$result, &$schema_stack) {
         $actionableNodeKinds = [NodeKind::OPERATION_DEFINITION, NodeKind::SELECTION_SET, NodeKind::FIELD, NodeKind::ARGUMENT, NodeKind::INLINE_FRAGMENT];
         if (!in_array($node->kind, $actionableNodeKinds)) {
           return;
         }
-        $result_last = array_pop($result_stack);
-        $schema_last = array_pop($schema_stack);
-        $schema_cursor = $schema_stack[count($schema_stack) - 1];
-        switch ($node->kind) {
-          case NodeKind::OPERATION_DEFINITION:
-            $result_stack[count($result_stack) - 1]['value'][$result_last['key']] = new ObjectType($result_last['value']);
-            break;
-          case NodeKind::SELECTION_SET:
-            if ($parent->kind == NodeKind::OPERATION_DEFINITION) {
-              $result_stack[count($result_stack) - 1]['value'][$result_last['key']] = $result_last['value'];
-            } else {
-              $result_stack[count($result_stack) - 1]['value']['type'][$result_last['key']] = $result_last['value'];
-            }
-            break;
-          case NodeKind::FIELD:
-            if (empty($result_last['hasChildren'])) {
-              $result_last['value']['type'] = $schema_last['type'];
-            } else {
-              $field_type = self::convertNameToNativeType($result_last['value']['type']['name']);
-              if (is_null($field_type)) {
-                if ($result_last['fieldType'] == 'UnionType') {
-                  $field_type = new UnionType($result_last['value']['type']);
-                } else if ($result_last['fieldType'] == 'InterfaceType') {
-                  $field_type = new InterfaceType($result_last['value']['type']);
-                } else {
-                  // check if we have to add fields from interfaces first
-                  foreach ($result_last['value']['type']['interfaces'] as $interface) {
-                    foreach ($interface->getFields() as $field) {
-                      if (!array_key_exists($field->name, $result_last['value']['type']['fields'])) {
-                        $result_last['value']['type']['fields'][$field->name] = $field->config;
-                      }
-                    }
-                  }
-                  $field_type = new ObjectType($result_last['value']['type']);
-                }
-              }
-              $result_last['value']['type'] = $field_type;
-            }
-            $result_stack[count($result_stack) - 1]['value'][$result_last['key']] = $result_last['value'];
-            break;
-          case NodeKind::ARGUMENT:
-            if (array_key_exists($result_last['key'], $result_stack[count($result_stack) - 1]['value'])) {
-              $result_stack[count($result_stack) - 1]['value'][$result_last['key']][] = $result_last['value'];
-            } else {
-              $result_stack[count($result_stack) - 1]['value'][$result_last['key']] = $result_last['value'];
-            }
-            break;
-          case NodeKind::INLINE_FRAGMENT:
-            if ($result_last['fieldType'] == 'UnionType') {
-              $field_type = new UnionType($result_last['value']['type']);
-            } else if ($result_last['fieldType'] == 'InterfaceType') {
-              $field_type = new InterfaceType($result_last['value']['type']);
-            } else {
-              $field_type = new ObjectType($result_last['value']['type']);
-            }
-            $result_stack[count($result_stack) - 1]['value'][] = $field_type;
-            break;
-        }
+        $last = array_pop($schema_stack);
       }
     ]);
 
-    // Add an empty query if necessary
-    if (!array_key_exists('query', $result_stack[0]['value'])) {
-      $result_stack[0]['value']['query'] = new ObjectType(['name' => 'Query', 'fields' => []]);
+    print(json_encode($result));
+    return $result;
+  }
+
+  /**
+   * Takes an array of type data and returns an array of the actual types.
+   */
+  private static function getTypes(Schema $schema, DocumentNode $ast)
+  {
+    $typeData = self::getTypeData($schema, $ast);
+    $result = [];
+
+    $stack = [$schema->getQueryType()->name];
+    // Add mutation to stack if necessary
+    if (self::hasOperation('mutation', $ast)) {
+      $stack[] = $schema->getMutationType()->name;
     }
 
-    print("\n\n");
-    $test = new Schema($result_stack[0]['value']);
-    print(SchemaPrinter::doPrint($test));
-    return new Schema($result_stack[0]['value']);
+    foreach ($typeData as $key => $value) {
+      $result[$key] = null;
+    }
+    while (!empty($stack)) {
+      $type = $stack[count($stack) - 1];
+      if (array_key_exists('object', $typeData[$type])) {
+        $result[$type] = $typeData[$type]['object'];
+        array_pop($stack);
+        continue;
+      }
+      $fieldsReady = true;
+      if ($typeData[$type]['typeClass'] != 'UnionType') {
+        foreach ($typeData[$type]['config']['fields'] as &$fieldConfig) {
+          // field type
+          if (gettype($fieldConfig['type']) == 'string') {
+            if (array_key_exists('object', $typeData[$fieldConfig['type']])) {
+              $result[$fieldConfig['type']] = $typeData[$fieldConfig['type']]['object'];
+              $fieldConfig['type'] = $typeData[$fieldConfig['type']]['object'];
+            } else {
+              $stack[] = $fieldConfig['type'];
+              $fieldsReady = false;
+            }
+          }
 
+          // field args
+          foreach ($fieldConfig['args'] as &$argConfig) {
+            if (gettype($argConfig['type']) == 'string') {
+              if (array_key_exists('object', $typeData[$argConfig['type']])) {
+                $result[$argConfig['type']] = $typeData[$argConfig['type']]['object'];
+                $argConfig['type'] = $typeData[$argConfig['type']]['object'];
+              } else {
+                $stack[] = $argConfig['type'];
+                $fieldsReady = false;
+              }
+            }
+          }
+        }
+      }
+      if ($fieldsReady) {
+        if ($typeData[$type]['typeClass'] == 'ObjectType') {
+          $typeData[$type]['object'] = new ObjectType($typeData[$type]['config']);
+        } else if ($typeData[$type]['typeClass'] == 'InterfaceType') {
+          $typeData[$type]['object'] = new InterfaceType($typeData[$type]['config']);
+        } else if ($typeData[$type]['typeClass'] == 'UnionType') {
+          $typeData[$type]['object'] = new UnionType($typeData[$type]['config']);
+        } else {
+          throw new Exception('Invalid type class');
+        }
+        $result[$type] = $typeData[$type]['object'];
+      }
+    }
+
+    return $result;
+  }
+
+  public static function filterSchemaByQuery(Schema $schema, string $query) {
+    $ast = Parser::parse($query, ['noLocation' => true]);
+    $types = self::getTypes($schema, $ast);
+    $config = ['query' => $types[$schema->getQueryType()->name]];
+    if (self::hasOperation('mutation', $ast)) {
+      $config['mutation'] = $types[$schema->getMutationType()->name];
+    }
+    //TODO: types
+    return new Schema($config);
   }
 }

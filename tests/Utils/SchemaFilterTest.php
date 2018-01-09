@@ -135,7 +135,7 @@ class SchemaFilterTest extends \PHPUnit_Framework_TestCase
       'query' => new ObjectType([
         'name' => 'root',
         'fields' => [
-          'type1' => $oldType
+          'type1' => ['type' => $oldType, 'args' => ['name1' => Type::string()]]
         ]
       ])
     ]);
@@ -152,10 +152,10 @@ class SchemaFilterTest extends \PHPUnit_Framework_TestCase
     $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'query root { type1 { field1 } }');
     $this->assertEquals([], FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema));
 
-    $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'query root { type1 { field1(name: "testing") } }');
+    $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'query root { type1(name1: "test") { field1(name: "testing") } }');
     $this->assertGreaterThan(0, count(FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema)));
   }
-
+ 
   public function testFiltersOutUnusedTypesInMutations()
   {
     $type1 = new ObjectType([
@@ -209,7 +209,7 @@ class SchemaFilterTest extends \PHPUnit_Framework_TestCase
     $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'mutation Mutation { type2 }');
     $this->assertGreaterThan(0, count(FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema)));
   }
-
+ 
   public function testFiltersOutUnusedMutations()
   {
     $type1 = new ObjectType([
@@ -356,7 +356,7 @@ class SchemaFilterTest extends \PHPUnit_Framework_TestCase
     $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'query root { type1 { ... on TypeInUnion2 { field1 } } }');
     $this->assertGreaterThan(0, count(FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema)));
   }
-
+ 
   public function testFilterWorksWithEnums() {
     $enumTypeThatLosesAValueOld = new EnumType([
       'name' => 'EnumTypeThatLosesAValue',
@@ -395,5 +395,10 @@ class SchemaFilterTest extends \PHPUnit_Framework_TestCase
 
     $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'query root { type1 }');
     $this->assertGreaterThan(0, count(FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema)));
+  }
+
+
+  public function testFilterWorksForCircularTypes() {
+    $userType = null;
   }
 }
