@@ -397,8 +397,83 @@ class SchemaFilterTest extends \PHPUnit_Framework_TestCase
     $this->assertGreaterThan(0, count(FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema)));
   }
 
+  public function testFilterWorksForMultipleTypeOccurrences() {
+    $type1 = new ObjectType([
+      'name' => 'Type1',
+      'fields' => [
+        'field1' => ['type' => Type::string()],
+        'field2' => ['type' => Type::string()]
+      ]
+    ]);
+    $type2 = new ObjectType([
+      'name' => 'Type1',
+      'fields' => [
+        'field1' => ['type' => Type::string()]
+      ]
+    ]);
+
+    $oldSchema = new Schema([
+      'query' => new ObjectType([
+        'name' => 'root',
+        'fields' => [
+          'type1' => $type1,
+          'type11' => $type1
+        ]
+      ])
+    ]);
+    $newSchema = new Schema([
+      'query' => new ObjectType([
+        'name' => 'root',
+        'fields' => [
+          'type1' => $type2,
+          'type11' => $type2
+        ]
+      ])
+    ]);
+
+    $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'query root { type1 { field1 } }');
+    $this->assertEquals([], FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema));
+
+    $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'query root { type1 { field1 } type11 { field2 } }');
+    $this->assertGreaterThan(0, count(FindBreakingChanges::findBreakingChanges($filteredSchema, $newSchema)));
+  }
 
   public function testFilterWorksForCircularTypes() {
     $userType = null;
+    $userType = new ObjectType([
+      'name' => 'User',
+      'fields' => function() use (&$userType) {
+        return [
+          'email' => [
+            'type' => Type::string()
+          ],
+          'posts' => [
+            'type' => Type::listOf($postType)
+          ]
+        ];
+      }
+    ]);
+
+    $postType = new ObjectType([
+      'name' => 'Post',
+      'fields' => function () use (&$userType) {
+        return [
+          'usersWhoLike' => [
+            'type' => Type::listOf($userType)
+          ]
+        ];
+      }
+    ]);
+
+    $oldSchema = new Schema([
+      'query' => new ObjectType([
+        'name' => 'root',
+        'fields' => [
+          'user' => $userType,
+        ]
+      ])
+    ]);
+
+    $filteredSchema = SchemaFilter::filterSchemaByQuery($oldSchema, 'query root { user } }');
   }
 }

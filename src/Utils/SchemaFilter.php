@@ -41,6 +41,9 @@ class SchemaFilter
     }
   }
 
+  /**
+   * Checks whether the given operation is present in the syntax tree.
+   */
   private static function hasOperation($operation, $ast) {
     foreach ($ast->definitions as $definitionNode) {
       if ($definitionNode->kind == NodeKind::OPERATION_DEFINITION && $definitionNode->operation == $operation) {
@@ -50,8 +53,10 @@ class SchemaFilter
     return false;
   }
 
+  /**
+   * Given a type object, returns the type of the type object as a string.
+   */
   private static function getTypeClass($type) {
-    print(get_class($type));
     if (is_a($type, 'GraphQL\Type\Definition\InterfaceType')) {
       return 'InterfaceType';
     } else if (is_a($type, 'GraphQL\Type\Definition\UnionType')) {
@@ -68,7 +73,68 @@ class SchemaFilter
   }
 
   /**
-   * Takes a schema and query, and returns data on each Type necessary to do the actual filtering.
+   * Given two field configs, returns a new, merged config.
+   */
+  private static function mergeFieldData($fieldConfig1, $fieldConfig2) {
+    // all we really have to do is merge in arguments
+    foreach ($fieldConfig2['args'] as $argName => $argConfig) {
+      if (!array_key_exists($argName, $fieldConfig1['args'])) {
+        $fieldConfig1['args'][$argName] = $argConfig;
+      }
+    }
+    return $fieldConfig1;
+  }
+
+  /**
+   * Given two arrays of type data, returns a new array of merged type data.
+   */
+  private static function mergeTypeData($typeData1, $typeData2) {
+    // if we already have an object, we have complete type data already
+    if (array_key_exists('object', $typeData1)) {
+      return $typeData1;
+    }
+    if (array_key_exists('object', $typeData2)) {
+      return $typeData2;
+    }
+
+    // merge fields
+    if (array_key_exists('fields', $typeData1['config'])) {
+      foreach ($typeData2['config']['fields'] as $fieldName => $fieldConfig) {
+        if (!array_key_exists($fieldName, $typeData1['config']['fields'])) {
+          $typeData1['config']['fields'][$fieldName] = $fieldConfig;
+        } else {
+          $typeData1['config']['fields'][$fieldName] = self::mergeFieldData($typeData1['config']['fields'][$fieldName], $fieldConfig);
+        }
+      }
+    }
+
+    // merge interfaces
+    if (array_key_exists('interfaces', $typeData1['config'])) {
+      $type1InterfaceNames = array_map(function($i) { return $i->name; }, $typeData1['config']['interfaces']);
+      foreach ($typeData2['config']['interfaces'] as $interfaceType) {
+        if (!in_array($interfaceType->name, $type1InterfaceNames)) {
+          $typeData1['config']['interfaces'][] = $interfaceType;
+        }
+      }
+    }
+
+    // merge types for unions
+    if (array_key_exists('types', $typeData1['config'])) {
+      $type1ObjectTypeNames = array_map(function($o) { return $o->name; }, $typeData1['config']['types']);
+      foreach ($typeData2['config']['types'] as $objectType) {
+        if (!in_array($objectType->name, $type1ObjectTypeNames)) {
+          $typeData1['config']['types'][] = $objectType;
+        }
+      }
+    }
+
+    return $typeData1;
+  }
+
+  /**
+   * Takes a schema and query tree, and returns data on each Type necessary to do the actual filtering.
+   *
+   * Basically, we want a version of typemap that is truly flat and includes a little extra metadata.
    */
   private static function getTypeData(Schema $schema, DocumentNode $ast)
   {
@@ -83,7 +149,6 @@ class SchemaFilter
 
     Visitor::visit($ast, [
       'enter' => function ($node) use ($schema, &$result, &$schema_stack) {
-        print($node->kind);
         $last = $schema_stack[count($schema_stack) - 1];
         switch ($node->kind) {
           case NodeKind::OPERATION_DEFINITION:
@@ -91,29 +156,30 @@ class SchemaFilter
             $schema_stack[] = $last;
             $config = ['name' => $last->name, 'fields' => [], 'interfaces' => []];
             foreach($node->selectionSet->selections as $selectionNode) {
+              // Add fields to config
               if ($selectionNode->kind == NodeKind::FIELD) {
                 $field = $last->getField($selectionNode->name->value);
-                $fieldConfig = ['name' => $field->name, 'type' => $field->getType()->name, 'args' => []];
-                // Args
+                $fieldConfig = ['type' => $field->getType()->name, 'args' => []];
+                // Add arguments to this field 
                 if (!is_null($selectionNode->arguments)) {
                   foreach($selectionNode->arguments as $argumentNode) {
                     $argument = $field->getArg($argumentNode->name->value);
-                    $argumentConfig = ['name' => $argument->name, 'type' => $argument->getType()->name];
+                    $argumentConfig = ['type' => $argument->getType()->name];
                     if ($argument->defaultValueExists()) {
                       $argumentConfig['defaultValue'] = $argument->defaultValue;
                     }
-                    $fieldConfig['args'][] = $argumentConfig;
+                    $fieldConfig['args'][$argument->name] = $argumentConfig;
                   }
                 }
-                $config['fields'][] = $fieldConfig;
+                $config['fields'][$field->name] = $fieldConfig;
               } else if ($selectionNode->kind == NodeKind::INLINE_FRAGMENT) {
                 //TODO
               } else if ($selectionNode->kind == NodeKind::FRAGMENT_SPREAD) {
                 //TODO
               }
             }
-            //TODO: interfaces
-            $fieldNames = array_map(function ($f) { return $f['name']; }, $config['fields']);
+            // add interfaces
+            $fieldNames = array_keys($config['fields']);
             foreach ($last->getInterfaces() as $interfaceType) {
               foreach ($interfaceType->getFields() as $interfaceField) {
                 if (in_array($interfaceField->name, $fieldNames)) {
@@ -126,11 +192,17 @@ class SchemaFilter
             foreach ($config['interfaces'] as $interfaceType) {
               foreach ($interfaceType->getFields() as $interfaceField) {
                 if (!in_array($interfaceField->name, $fieldNames)) {
-                  $config['fields'][] = ['name' => $interfaceField->name, 'type' => $interfaceField->getType(), 'args' => $interfaceField->args];
+                  $config['fields'][$interfaceField->name] = ['type' => $interfaceField->getType(), 'args' => $interfaceField->args];
+                } else {
+                  $config['fields'][$interfaceField->name] = self::mergeFieldData($config['fields'][$interfaceField->name], ['type' => $interfaceField->getType(), 'args' => $interfaceField->args]);
                 }
               }
             }
-            $result[$last->name] = ['typeClass' => 'ObjectType', 'config' => $config];
+            if (array_key_exists($last->name, $result)) {
+              $result[$last->name] = self::mergeTypeData($result[$last->name], ['typeClass' => 'ObjectType', 'config' => $config]);
+            } else {
+              $result[$last->name] = ['typeClass' => 'ObjectType', 'config' => $config];
+            }
             break;
           case NodeKind::SELECTION_SET:
             if (method_exists($last, 'getFields')) {
@@ -147,8 +219,6 @@ class SchemaFilter
             $schema_stack[] = $last;
             break;
           case NodeKind::FIELD:
-            print($node->name->value);
-            print(count($node->arguments));
             $last = $last[$node->name->value];
             $schema_stack[] = $last;
             $type = $last->getType();
@@ -162,21 +232,22 @@ class SchemaFilter
             if ($typeClass == 'ObjectType' || $typeClass == 'InterfaceType') {
               $config['fields'] = [];
               foreach($node->selectionSet->selections as $selectionNode) {
+                // Add fields to this config
                 if ($selectionNode->kind == NodeKind::FIELD) {
                   $field = $type->getField($selectionNode->name->value);
-                  $fieldConfig = ['name' => $field->name, 'type' => $field->getType()->name, 'args' => []];
-                  // Args
+                  $fieldConfig = ['type' => $field->getType()->name, 'args' => []];
+                  // Add arguments to this field
                   if (!is_null($selectionNode->arguments)) {
                     foreach ($selectionNode->arguments as $argumentNode) {
                       $argument = $field->getArg($argumentNode->name->value);
-                      $argumentConfig = ['name' => $argument->name, 'type' => $argument->getType()->name];
+                      $argumentConfig = ['type' => $argument->getType()->name];
                       if ($argument->defaultValueExists()) {
                         $argumentConfig['defaultValue'] = $argument->defaultValue;
                       }
-                      $fieldConfig['args'][] = $argumentConfig;
+                      $fieldConfig['args'][$argument->name] = $argumentConfig;
                     }
                   }
-                  $config['fields'][] = $fieldConfig;
+                  $config['fields'][$field->name] = $fieldConfig;
                 } else if ($selectionNode->kind == NodeKind::INLINE_FRAGMENT) {
                   //TODO
                 } else if ($selectionNode->kind == NodeKind::FRAGMENT_SPREAD) {
@@ -184,10 +255,10 @@ class SchemaFilter
                 }
               }
 
-              //TODO: interfaces
+              // add interfaces
               if ($typeClass == 'ObjectType') {
                 $config['interfaces'] = [];
-                $fieldNames = array_map(function ($f) { return $f['name']; }, $config['fields']);
+                $fieldNames = array_keys($config['fields']);
                 foreach ($type->getInterfaces() as $interfaceType) {
                   foreach ($interfaceType->getFields() as $interfaceField) {
                     if (in_array($interfaceField->name, $fieldNames)) {
@@ -200,7 +271,9 @@ class SchemaFilter
                 foreach ($config['interfaces'] as $interfaceType) {
                   foreach ($interfaceType->getFields() as $interfaceField) {
                     if (!in_array($interfaceField->name, $fieldNames)) {
-                      $config['fields'][] = ['name' => $interfaceField->name, 'type' => $interfaceField->getType(), 'args' => $interfaceField->args];
+                      $config['fields'][$interfaceField->name] = ['type' => $interfaceField->getType(), 'args' => $interfaceField->args];
+                    } else {
+                      $config['fields'][$interfaceField->name] = self::mergeFieldData($config['fields'][$interfaceField->name], ['type' => $interfaceField->getType(), 'args' => $interfaceField->args]);
                     }
                   }
                 }
@@ -211,6 +284,7 @@ class SchemaFilter
               foreach ($type->getTypes() as $possibleType) {
                 $possibleTypes[$possibleType->name] = $possibleType;
               }
+              // Add types to union
               foreach($node->selectionSet->selections as $selectionNode) {
                 if ($selectionNode->kind == NodeKind::INLINE_FRAGMENT) {
                   $config['types'][] = $possibleTypes[$selectionNode->typeCondition->name->value];
@@ -219,7 +293,11 @@ class SchemaFilter
                 }
               }
             }
-            $result[$type->name] = ['typeClass' => $typeClass, 'config' => $config];
+            if (array_key_exists($type->name, $result)) {
+              $result[$type->name] = self::mergeTypeData($result[$type->name], ['typeClass' => $typeClass, 'config' => $config]);
+            } else {
+              $result[$type->name] = ['typeClass' => $typeClass, 'config' => $config];
+            }
             break;
           case NodeKind::ARGUMENT:
             $last = $last->getArg($node->name->value);
@@ -228,8 +306,7 @@ class SchemaFilter
             $result[$type->name] = ['type' => 'InputType', 'object' => $type];
             break;
           case NodeKind::INLINE_FRAGMENT:
-            //TODO
-            print(json_encode($last));
+            //TODO: add types for interfaces
             foreach ($last as $type) {
               if ($type->name == $node->typeCondition->name->value) {
                 $last = $type;
@@ -262,36 +339,54 @@ class SchemaFilter
     $result = [];
 
     $stack = [$schema->getQueryType()->name];
+    $justAdded = [$schema->getQueryType()->name];
+    $path = [];
     // Add mutation to stack if necessary
     if (self::hasOperation('mutation', $ast)) {
       $stack[] = $schema->getMutationType()->name;
     }
 
+    // TODO: actually use this for circular types
     foreach ($typeData as $key => $value) {
       $result[$key] = null;
     }
     while (!empty($stack)) {
       $type = $stack[count($stack) - 1];
+      if (in_array($type, $justAdded)) {
+        $path[] = $type;
+      }
+      $justAdded = [];
+
       if (array_key_exists('object', $typeData[$type])) {
         $result[$type] = $typeData[$type]['object'];
         array_pop($stack);
+        array_pop($path);
         continue;
       }
+
+      if (in_array($type, array_slice($path, 0, -1))) {
+        print(json_encode($path));
+        print($type);
+        throw new Exception('Still working on circular types!');
+      }
+
+      // If we've create the objects for all types of the fields, we're ready to turn this config into an object
       $fieldsReady = true;
       if ($typeData[$type]['typeClass'] != 'UnionType') {
+        // add types of fields to stack as necessary
         foreach ($typeData[$type]['config']['fields'] as &$fieldConfig) {
-          // field type
           if (gettype($fieldConfig['type']) == 'string') {
             if (array_key_exists('object', $typeData[$fieldConfig['type']])) {
               $result[$fieldConfig['type']] = $typeData[$fieldConfig['type']]['object'];
               $fieldConfig['type'] = $typeData[$fieldConfig['type']]['object'];
             } else {
               $stack[] = $fieldConfig['type'];
+              $justAdded[] = $fieldConfig['type'];
               $fieldsReady = false;
             }
           }
 
-          // field args
+          // add types of field args to stack as necessary
           foreach ($fieldConfig['args'] as &$argConfig) {
             if (gettype($argConfig['type']) == 'string') {
               if (array_key_exists('object', $typeData[$argConfig['type']])) {
@@ -299,6 +394,7 @@ class SchemaFilter
                 $argConfig['type'] = $typeData[$argConfig['type']]['object'];
               } else {
                 $stack[] = $argConfig['type'];
+                $justAdded[] = $argConfig['type'];
                 $fieldsReady = false;
               }
             }
